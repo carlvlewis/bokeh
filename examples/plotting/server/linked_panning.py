@@ -1,6 +1,5 @@
 import numpy as np
-from bokeh.plotting import *
-from bokeh.models import ColumnDataSource
+from bokeh.plotting import figure, gridplot, show, output_server
 
 output_server("linked_panning")
 
@@ -27,4 +26,4 @@ s3 = figure(plot_width=350, plot_height=350, x_range=s1.x_range)
 s3.scatter(x, y3)
 
 p = gridplot([[s1,s2, s3]])
-show()
+show(p)

@@ -1,3 +1,5 @@
+from __future__ import absolute_import
+
 import unittest
 from unittest import skipIf
 import warnings
@@ -72,10 +74,11 @@ class TestColumnDataSourcs(unittest.TestCase):
     def test_remove_exists(self):
         ds = ColumnDataSource()
         name = ds.add([1,2,3], "foo")
+        assert name
         ds.remove("foo")
         self.assertEquals(ds.column_names, [])
 
-    def test_remove_exists(self):
+    def test_remove_exists2(self):
         with warnings.catch_warnings(record=True) as w:
             ds = ColumnDataSource()
             ds.remove("foo")
@@ -84,7 +87,7 @@ class TestColumnDataSourcs(unittest.TestCase):
             self.assertEquals(w[0].category, UserWarning)
             self.assertEquals(str(w[0].message), "Unable to find column 'foo' in data source")
 
-class TestServerDataSourcs(unittest.TestCase):
+class TestServerDataSources(unittest.TestCase):
 
     def test_basic(self):
         ds = ServerDataSource()

@@ -1,29 +1,24 @@
 # The plot server must be running
 # Go to http://localhost:5006/bokeh to view this plot
 
-import numpy as np
-from bokeh.plotting import *
-from bokeh.models import ServerDataSource
+from bokeh.plotting import figure, show, output_server
 from bokeh.transforms import line_downsample
+from blaze.server.client import Client
+from blaze import Data
 
-"""
-In order to run this example, you have to execute
-./bokeh-server -D remotedata
-
-the remote data directory in the bokeh checkout has the sample data for this example
-
-In addition, you must install ArrayManagement from this branch (soon to be master)
-https://github.com/ContinuumIO/ArrayManagement
-"""
 output_server("remotedata")
-source = line_downsample.source(data_url="/defaultuser/AAPL.hdf5", 
-                                owner_username="defaultuser",
-                               domain='x')
 
+c = Client('http://localhost:5006')
+d = Data(c)
+table = d.aapl
+source = line_downsample.source()
+source.from_blaze(table, local=True)
 
-line('date', 'close',
-     x_axis_type = "datetime",
-     color='#A6CEE3', tools="pan,wheel_zoom,box_zoom,reset,previewsave",
-     source=source,
-     legend='AAPL')
-show()
+TOOLS="pan,wheel_zoom,box_zoom,reset,previewsave",
+
+p = figure(x_axis_type = "datetime", tools=TOOLS)
+p.line('date', 'close',
+       color='#A6CEE3',
+       source=source,
+       legend='AAPL')
+show(p)

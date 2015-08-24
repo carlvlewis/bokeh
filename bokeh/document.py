@@ -10,12 +10,11 @@ logger = logging.getLogger(__file__)
 
 import uuid
 
-from . import _glyph_functions as gf
 from .exceptions import DataIntegrityException
 from .models import PlotContext
 from .plot_object import PlotObject
-from .plotting_helpers import _new_xy_plot
-from .utils import dump
+from .util.serialization import dump
+from .validation import check_integrity
 
 class Document(object):
     """ The Document class is a container to hold Bokeh objects that
@@ -131,6 +130,7 @@ class Document(object):
         # ensure that the entire graph is added before dump
         for obj in self.context.references():
             self._add(obj)
+        self.prune()
 
     # functions for turning json objects into json models
 
@@ -191,6 +191,8 @@ class Document(object):
         for m in all_models:
             props = m.finalize(self._models)
             m.update(**props)
+
+        for m in all_models:
             m.setup_events()
 
         if events == 'all':
@@ -215,21 +217,26 @@ class Document(object):
 
         return all_models
 
-    def dump(self, *models):
+    def dump(self, *models, **kw):
         """ Convert models to json objects.
 
         Args:
             *models (PlotObject) : models to convert to json objects
                 If models is empty, ``dump`` converts all models in this d
                 ocument.
+            validate (bool, optional) : whether to perform integrity checks on
+                the object graph (default: True)
 
         Return:
             dict : json objects
 
         """
+        validate = kw.get("validate", True)
         self._add(*self.context.references())
         if not models:
             models = self._models.values()
+        if validate:
+            check_integrity(models)
         json = dump(models, docid=self.docid)
         return json
 
@@ -358,3 +365,14 @@ class Document(object):
         self.load(plot_context_json, *other_objects)
         # set the new Plot Context
         self.context = self._models[plot_context_json['id']]
+
+    def prune(self):
+        """Remove all models that are not in the plot context
+        """
+        all_models = self.context.references()
+        to_keep = set([x._id for x in all_models])
+        to_delete = set(self._models.keys()) - to_keep
+        to_delete_objs = []
+        for k in to_delete:
+            to_delete_objs.append(self._models.pop(k))
+        return to_delete_objs

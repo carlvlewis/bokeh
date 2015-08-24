@@ -15,7 +15,7 @@ rm -rf $MINICONDA.sh
 python -V
 
 PINNED_PKGS=$(cat <<EOF
-scipy <0.15.0
+
 EOF
 )
 echo -e "$PINNED_PKGS" > /home/travis/miniconda/conda-meta/pinned
@@ -26,7 +26,7 @@ conda install --yes $DEPS_TRAVIS
 conda config --add channels bokeh
 conda config --add channels mutirri   # TODO: remove when packages are moved to bokeh
 
-CONDA_PY="${TRAVIS_PYTHON_VERSION/./}" conda build conda.recipe
+CONDA_PY="${TRAVIS_PYTHON_VERSION/./}" conda build --quiet conda.recipe
 conda install --use-local --yes bokeh
 
 DEPS_TEST=$(cat <<EOF | python -
@@ -37,6 +37,9 @@ EOF
 
 conda install --yes $DEPS_TEST
 conda install --yes abstract-rendering
+conda install --yes multiuserblazeserver pillow
+##hack - we need latest blaze right now
+conda install --yes -c blaze blaze
 
 MATPLOTLIB_RC=$(python -c "import matplotlib; print(matplotlib.matplotlib_fname())")
 sed -i 's/^backend\s*:.*$/backend: agg/' $MATPLOTLIB_RC

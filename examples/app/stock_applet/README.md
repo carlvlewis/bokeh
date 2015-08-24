@@ -15,6 +15,11 @@ file. The file is located at:
 
     http://quantquote.com/files/quantquote_daily_sp500_83986.zip
 
+A python script is included in the applet's directory to collect and extract 
+the data, which can be run directly from the directory:
+
+    python stock_data.py
+
 You can use a browser to download the file, or depending on your system you
 may be able to use curl:
 
@@ -33,7 +38,7 @@ clicking on it, or by executing this command from the command line:
 This should leave a "quantquote_daily_sp500_83986" subdirectory in this directory.
 Move the 'daily' directory by executing this command from the command line:
 
-    mv 'quantquote_daily_sp500_83986/daily .'
+    mv quantquote_daily_sp500_83986/daily .
 
 Now you can safely remove the empty "quantquote_daily_sp500_83986" directory.
 

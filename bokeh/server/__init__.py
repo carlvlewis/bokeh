@@ -1,18 +1,16 @@
-from __future__ import print_function
+from __future__ import absolute_import, print_function
 
 import argparse, os, sys
-import imp
 import logging
-from os.path import dirname
 
 import werkzeug.serving
 
-from bokeh import __version__
-from bokeh.server.utils.reload import robust_reloader
-from bokeh.server.app import bokeh_app
-from bokeh.settings import settings
+from bokeh import __version__; __version__
+from bokeh.server.utils.reload import robust_reloader; robust_reloader
+from bokeh.server.app import bokeh_app; bokeh_app
+from bokeh.settings import settings; settings
 
-DEFAULT_BACKEND = os.environ.get('BOKEH_SERVER_DEFAULT_BACKEND', 'shelve')
+DEFAULT_BACKEND = os.environ.get('BOKEH_SERVER_DEFAULT_BACKEND', 'memory')
 if DEFAULT_BACKEND not in ['redis', 'shelve', 'memory']:
     print("Unrecognized default backend: '%s'. Accepted values are: 'redis', 'shelve', 'memory'" % DEFAULT_BACKEND)
     sys.exit(1)
@@ -36,12 +34,26 @@ def build_parser():
                          help="URL prefix for server. e.g. 'host:port/<prefix>/bokeh' (default: None)",
                          type=str
                          )
+    general.add_argument("--https",
+                         help="If present, the server will be use HTTPS instead of HTTP (defualt: False).",
+                         action="store_true",
+                         default=False
+                         )
+    general.add_argument("--https-certfile",
+                         help="Required with the --https flag. Must be the filename of a valid HTTPS crt file (default: None)",
+                         type=str
+                         )
+    general.add_argument("--https-keyfile",
+                         help="Required with the --https flag. Must be the filename of a valid HTTPS key file (default: None)",
+                         type=str
+                         )
 
     # advanced configuration
     advanced = parser.add_argument_group('Advanced Options')
-    advanced.add_argument("-D", "--data-directory",
-                          help="location for server data sources",
-                          type=str
+    advanced.add_argument("-D", "--blaze-config",
+                          help="blaze_config_File",
+                          type=str,
+                          default=None
                           )
     advanced.add_argument("-m", "--multi-user",
                           help="start in multi-user configuration (default: False)",
@@ -84,16 +96,10 @@ def build_parser():
                             help="connection string for websocket (unnecessary if auto-starting)",
                             default=None
                             )
-    websockets.add_argument("--ws-port",
-                            help="port for websocket worker to listen on",
-                           default=5007,
-                            type=int
-                            )
-
     # dev, debugging, etc.
     class DevAction(argparse.Action):
         def __call__(self, parser, namespace, values, option_string=None):
-            namespace.splitjs = True
+            #namespace.splitjs = True
             namespace.debugjs = True
             namespace.backend = 'memory'
 
@@ -139,7 +145,10 @@ def run():
     args = parser.parse_args(sys.argv[1:])
 
     level = logging.DEBUG if args.debug else logging.INFO
+    # TODO: this does nothing - because bokeh/__init__.py is already imported
+    # and basicConfig was already called
     logging.basicConfig(level=level, format="%(asctime)s:%(levelname)s:%(name)s:%(message)s")
+
 
     backend_options = args.backend
     if backend_options == 'redis':
@@ -167,14 +176,12 @@ def run():
     backend        : %s
     python options : %s
     js options     : %s
-    data-directory : %s
     """ % (
         sys.version.split()[0], __version__,
         args.ip, args.port,
         backend_options,
         py_options,
         js_options,
-        None if not args.data_directory else args.data_directory,
     ))
 
     settings.debugjs = args.debugjs

@@ -7,20 +7,24 @@ from bokeh.models.glyphs import Circle
 from bokeh.models import (
     GMapPlot, Range1d, ColumnDataSource, LinearAxis,
     PanTool, WheelZoomTool, BoxSelectTool,
-    BoxSelectionOverlay, GMapOptions)
+    BoxSelectionOverlay, GMapOptions,
+    NumeralTickFormatter, PrintfTickFormatter)
 from bokeh.resources import INLINE
 
 x_range = Range1d()
 y_range = Range1d()
 
-map_options = GMapOptions(lat=30.2861, lng=-97.7394, zoom=15)
+
+# JSON style string taken from: https://snazzymaps.com/style/1/pale-dawn
+map_options = GMapOptions(lat=30.2861, lng=-97.7394, map_type="roadmap", zoom=13, styles="""
+[{"featureType":"administrative","elementType":"all","stylers":[{"visibility":"on"},{"lightness":33}]},{"featureType":"landscape","elementType":"all","stylers":[{"color":"#f2e5d4"}]},{"featureType":"poi.park","elementType":"geometry","stylers":[{"color":"#c5dac6"}]},{"featureType":"poi.park","elementType":"labels","stylers":[{"visibility":"on"},{"lightness":20}]},{"featureType":"road","elementType":"all","stylers":[{"lightness":20}]},{"featureType":"road.highway","elementType":"geometry","stylers":[{"color":"#c5c6c6"}]},{"featureType":"road.arterial","elementType":"geometry","stylers":[{"color":"#e4d7c6"}]},{"featureType":"road.local","elementType":"geometry","stylers":[{"color":"#fbfaf7"}]},{"featureType":"water","elementType":"all","stylers":[{"visibility":"on"},{"color":"#acbcc9"}]}]
+""")
 
 plot = GMapPlot(
     x_range=x_range, y_range=y_range,
     map_options=map_options,
     title = "Austin"
 )
-plot.map_options.map_type="hybrid"
 
 source = ColumnDataSource(
     data=dict(
@@ -39,10 +43,10 @@ box_select = BoxSelectTool()
 
 plot.add_tools(pan, wheel_zoom, box_select)
 
-xaxis = LinearAxis(axis_label="lat", major_tick_in=0)
+xaxis = LinearAxis(axis_label="lat", major_tick_in=0, formatter=NumeralTickFormatter(format="0.000"))
 plot.add_layout(xaxis, 'below')
 
-yaxis = LinearAxis(axis_label="lon", major_tick_in=0)
+yaxis = LinearAxis(axis_label="lon", major_tick_in=0, formatter=PrintfTickFormatter(format="%.3f"))
 plot.add_layout(yaxis, 'left')
 
 overlay = BoxSelectionOverlay(tool=box_select)

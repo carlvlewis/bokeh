@@ -1,5 +1,43 @@
-""" A set of descriptors that document intended types for attributes on
-classes and implement convenience behaviors like default values, etc.
+""" Properties are objects that can be assigned as class level
+attributes on Bokeh models, to provide automatic serialization
+and validation.
+
+For example, the following defines a model that has integer,
+string, and list[float] properties::
+
+    class Model(HasProps):
+        foo = Int
+        bar = String
+        baz = List(Float)
+
+The properties of this class can be initialized by specifying
+keyword arguments to the initializer::
+
+    m = Model(foo=10, bar="a str", baz=[1,2,3,4])
+
+But also by setting the attributes on an instance::
+
+    m.foo = 20
+
+Attempts to set a property to a value of the wrong type will
+result in a ``ValueError`` exception::
+
+    >>> m.foo = 2.3
+    Traceback (most recent call last):
+      File "<stdin>", line 1, in <module>
+      File "/Users/bryan/work/bokeh/bokeh/properties.py", line 585, in __setattr__
+        super(HasProps, self).__setattr__(name, value)
+      File "/Users/bryan/work/bokeh/bokeh/properties.py", line 159, in __set__
+        raise e
+      File "/Users/bryan/work/bokeh/bokeh/properties.py", line 152, in __set__
+        self.validate(value)
+      File "/Users/bryan/work/bokeh/bokeh/properties.py", line 707, in validate
+        (nice_join([ cls.__name__ for cls in self._underlying_type ]), value, type(value).__name__))
+    ValueError: expected a value of type int8, int16, int32, int64 or int, got 2.3 of type float
+
+Additionally, properties know how to serialize themselves,
+to be understood by BokehJS.
+
 """
 from __future__ import absolute_import, print_function
 
@@ -11,6 +49,7 @@ import dateutil.parser
 import collections
 from importlib import import_module
 from copy import copy
+from warnings import warn
 import inspect
 import logging
 logger = logging.getLogger(__name__)
@@ -18,8 +57,52 @@ logger = logging.getLogger(__name__)
 from six import integer_types, string_types, add_metaclass, iteritems
 import numpy as np
 
-from . import enums, colors
-from .utils import nice_join
+from . import enums
+from .util.string import nice_join
+
+def field(name):
+    ''' Convenience function do explicitly mark a field specification for
+    a Bokeh model property.
+
+    Args:
+        name (str) : name of a data source field to reference for a property.
+
+    Returns:
+        dict : `{"field": name}`
+
+    Note:
+        This function is included for completeness. String values for
+        property specifications are by default interpreted as field names.
+
+    '''
+    return dict(field=name)
+
+def value(val):
+    ''' Convenience function do explicitly mark a value specification for
+    a Bokeh model property.
+
+    Args:
+        val (any) : a fixed value to specify for a property.
+
+    Returns:
+        dict : `{"value": name}`
+
+    Note:
+        String values for property specifications are by default interpreted
+        as field names. This function is especially useful when you want to
+        specify a fixed value with text properties.
+
+    Example:
+
+    .. code-block:: python
+
+        # The following will take text values to render from a data source
+        # column "text_column", but use a fixed value "12pt" for font size
+        p.text("x", "y", text="text_column",
+               text_font_size=value("12pt"), source=source)
+
+    '''
+    return dict(value=val)
 
 bokeh_integer_types = (np.int8, np.int16, np.int32, np.int64) + integer_types
 
@@ -41,7 +124,7 @@ class Property(object):
             self.validate(default)
 
         self._default = default
-        self.help = help
+        self.__doc__ = help
         self.alternatives = []
 
         # This gets set by the class decorator at class creation time
@@ -158,297 +241,16 @@ class Property(object):
     def __or__(self, other):
         return Either(self, other)
 
-class DataSpec(Property):
-    """ Because the BokehJS glyphs support a fixed value or a named
-    field for most data fields, we capture that in this descriptor.
-    Fields can have a fixed value, or be a name that is looked up
-    on the datasource (usually as a column or record array field).
-    Numerical data can also have units of screen or data space.
-
-    We mirror the JS convention in this Python descriptor.  For details,
-    see renderers/properties.coffee in BokehJS, and specifically the
-    select() function.
-
-    There are multiple ways to set a DataSpec, illustrated below with comments
-    and example code.
-
-    Setting DataSpecs
-
-
-    Simple example::
-
-        class Foo(HasProps):
-            x = DataSpec("x", units="data")
-
-        f = Foo()
-        f.x = "fieldname"  # Use the datasource field named "fieldname"
-        f.x = 12           # A fixed value of 12
-
-    Can provide a dict with the fields explicitly named::
-
-        f.width = {"name": "foo"}
-        f.size = {"name": "foo", "units": "screen"}
-
-    Reading DataSpecs
-
-
-    In the cases when the dataspec is set to just a field name or a
-    fixed value, then those are returned.  If the no values have
-    been set, then the value of to_dict() is returned.
-
-    In all cases, to determine the full dict that will be used to
-    represent this dataspec, use the to_dict() method.
-
-    Implementation
-
-
-    The DataSpec instance is stored in the class dict, and acts as a
-    descriptor.  Thus, it is shared between all instances of the class.
-    Instance-specific data is stored in the instance dict, in a private
-    variable named _[attrname].  This stores the actual value that the
-    user last set (and does not exist if the user has not yet set the
-    value).
-
-    """
-
-    def __init__(self, field=None, units="data", min_value=None, default=_NotSet, help=None):
-        """
-        Parameters
-        ==========
-        **field** is the string name of a data column to look up.
-        **units** is either "data" or "screen"
-        """
-        # Don't use .name because the HasProps metaclass uses that to
-        # store the attribute name on this descriptor.
-        self.field = field
-        self.units = units
-        self._default = default
-        self.min_value = min_value
-        self.help = help
-
-    @classmethod
-    def autocreate(cls, name=None):
-        # In this case, use the name the user assigned this DataSpec to
-        # as the default field name.
-        d = cls(field=name)
-        return d
-
-    def _get(self, obj):
-        """ Try to implement a "natural" interface: if the user just set
-        simple values or field names, the getter just returns those.
-        However, if the user has also overridden the "units" or "default"
-        settings, then a dictionary is returned.
-        """
-        if hasattr(obj, self._name):
-            setval = getattr(obj, self._name)
-            if isinstance(setval, string_types):
-                # A string representing the field
-                return setval
-            elif not isinstance(setval, dict):
-                # Typically a number presenting the fixed value
-                return setval
-            else:
-                return self.to_dict(obj)
-        else:
-            # If the user hasn't set anything
-            if self.field is not None:
-                return self.field
-            if self.default != _NotSet:
-                return self.default
-            # XXX: implicit `return None` or unreachable?
-
-    def to_dict(self, obj):
-        # Build the complete dict
-        setval = getattr(obj, self._name, None)
-        if isinstance(setval, string_types):
-            d = {"field": setval, "units": self.units}
-        elif isinstance(setval, dict):
-            d = {"units": self.units}
-            d.update(setval)
-        elif setval is not None:
-            # a fixed value of some sort; no need to store the default value
-            d = {"value": setval, "units": self.units}
-        else:
-            # If the user never set a value
-            if self.field is not None:
-                d = {"field": self.field, "units": self.units}
-            elif self.default != _NotSet:
-                d = {"value": self.default, "units": self.units}
-            else:
-                d = {}
-
-        if "value" in d and self.min_value is not None:
-            if d["value"] < self.min_value:
-                raise ValueError("value must be greater than %s" % str(self.min_value))
-        return d
-
-    def __repr__(self):
-        return "DataSpec(field=%r, units=%r)" % (self.field, self.units)
-
-
-class ColorSpec(DataSpec):
-    """ Subclass of DataSpec for specifying colors.
-
-    Although this serves the same role as a DataSpec, its usage is somewhat
-    different because:
-
-    * Specifying a fixed value is much more common
-    * Strings can be both field identifiers or refer to one of the SVG
-      Named Colors (or be a hex value starting with "#")
-    * There are no units
-
-    For colors, because we support named colors and hex values prefaced
-    with a "#", when we are handed a string value, there is a little
-    interpretation: if the value is one of the 147 SVG named colors or
-    it starts with a "#", then it is interpreted as a value.  Otherwise,
-    it is treated as a field name.
-
-    If a 3-tuple is provided, then it is treated as an RGB (0..255).
-    If a 4-tuple is provided, then it is treated as an RGBa (0..255), with
-    alpha as a float between 0 and 1.  (This follows the HTML5 Canvas API.)
-
-    Unlike DataSpec, ColorSpecs do not have a "units" property.
-
-    When reading out a ColorSpec, it returns a tuple, hex value, or
-    field name
-
-    There are two common use cases for ColorSpec: setting a constant value,
-    and indicating a field name to look for on the datasource:
-
-    >>> class Bar(HasProps):
-    ...     col = ColorSpec("green")
-    ...     col2 = ColorSpec("colorfield")
-
-    >>> b = Bar()
-    >>> b.col = "red"  # sets a fixed value of red
-    >>> b.col
-    "red"
-    >>> b.col = "myfield"  # Use the datasource field named "myfield"
-    >>> b.col
-    "myfield"
-
-    For more examples, see tests/test_glyphs.py
-    """
-
-    NAMEDCOLORS = set(colors.__colors__)
-
-    def __init__(self, field_or_value=None, field=None, value=None, default=_NotSet, help=None):
-        # The fancy footwork below is so we auto-interpret the first positional
-        # parameter as either a field or a fixed value.  If either "field" or
-        # "value" are then supplied as keyword arguments, then those will
-        # override the inferred value from the positional argument.
-
-        self.field = field
-        self._default = default
-        self.value = value
-        self.help = help
-
-        if field_or_value is not None:
-            if self.isconst(field_or_value):
-                self.value = field_or_value
-            else:
-                self.field = field_or_value
-
-        # We need to distinguish if the user ever explicitly sets the attribute; if
-        # they explicitly set it to None, we should pass on None in the dict.
-        self._isset = False
-
-    @classmethod
-    def isconst(cls, arg):
-        """ Returns True if the argument is a literal color.  Check for a
-        well-formed hexadecimal color value.
-        """
-        return isinstance(arg, string_types) and \
-               ((len(arg) == 7 and arg[0] == "#") or arg in cls.NAMEDCOLORS)
-
-    def _formattuple(self, colortuple):
-        if isinstance(colortuple, tuple):
-            if len(colortuple) == 3:
-                return "rgb%r" % (colortuple,)
-            else:
-                return "rgba%r" % (colortuple,)
-        else:
-            return colortuple
-
-    def _get(self, obj):
-        # One key difference in ColorSpec.__get__ from the base class is
-        # that we do not call self.to_dict() in any circumstance, because
-        # this could lead to formatting color tuples as "rgb(R,G,B)" instead
-        # of keeping them as tuples.
-        if hasattr(obj, self._name):
-            setval = getattr(obj, self._name)
-            if self.isconst(setval) or isinstance(setval, tuple):
-                # Fixed color value
-                return setval
-            elif isinstance(setval, string_types):
-                return setval
-            elif setval is None:
-                return None
-            else:
-                # setval should be a dict at this point
-                assert(isinstance(setval, dict))
-                return setval
-        else:
-            if self.value is not None:
-                return self.value
-            if self.default != _NotSet:
-                return self.default
-            else:
-                return self.field
-
-    def __set__(self, obj, arg):
-        self._isset = True
-        if isinstance(arg, tuple):
-            if len(arg) in (3, 4):
-                # RGB or RGBa
-                pass
-            else:
-                raise RuntimeError("Invalid tuple being assigned to ColorSpec; must be length 2, 3, or 4.")
-        elif isinstance(arg, colors.Color):
-            arg = arg.to_css()
-        super(ColorSpec, self).__set__(obj, arg)
-
-    def to_dict(self, obj):
-        setval = getattr(obj, self._name, None)
-        if self.default != _NotSet and not self._isset:
-            setval = self.default
-        if setval is not None:
-            if self.isconst(setval):
-                # Hexadecimal or named color
-                return {"value": setval}
-            elif isinstance(setval, tuple):
-                # RGB or RGBa
-                # TODO: Should we validate that alpha is between 0..1?
-                return {"value": self._formattuple(setval)}
-            elif isinstance(setval, string_types):
-                return {"field": setval}
-            elif isinstance(setval, dict):
-                # this is considerably simpler than the DataSpec case because
-                # there are no units involved, and we've handled all of the
-                # value cases above.
-                return setval.copy()
-        else:
-            if self._isset:
-                if self.value is None:
-                    return {"value": None}
-                else:
-                    return {"value": getattr(obj, self._name, self.value)}
-            else:
-                if self.value:
-                    return {"value": self.value}
-                return {"field": self.field}
-
-    def __repr__(self):
-        return "ColorSpec(field=%r)" % self.field
-
 class Include(object):
-    ''' Include other properties from mixin Models, with a given prefix. '''
+    """ Include other properties from mixin Models, with a given prefix. """
 
-    def __init__(self, delegate):
+    def __init__(self, delegate, help="", use_prefix=True):
         if not (isinstance(delegate, type) and issubclass(delegate, HasProps)):
             raise ValueError("expected a subclass of HasProps, got %r" % delegate)
 
         self.delegate = delegate
+        self.help = help
+        self.use_prefix = use_prefix
 
 class MetaHasProps(type):
     def __new__(cls, class_name, bases, class_dict):
@@ -464,7 +266,10 @@ class MetaHasProps(type):
                 continue
 
             delegate = prop.delegate
-            prefix = re.sub("_props$", "", name) + "_"
+            if prop.use_prefix:
+                prefix = re.sub("_props$", "", name) + "_"
+            else:
+                prefix = ""
 
             for subpropname in delegate.class_properties(withbases=False):
                 fullpropname = prefix + subpropname
@@ -474,7 +279,15 @@ class MetaHasProps(type):
                     # so two properties don't write to the same hidden variable
                     # inside the instance.
                     subprop = copy(subprop)
-                includes[fullpropname] = subprop
+                if "%s" in prop.help:
+                    doc = prop.help % subpropname.replace('_', ' ')
+                else:
+                    doc = prop.help
+                try:
+                    includes[fullpropname] = subprop(help=doc)
+                except TypeError:
+                    includes[fullpropname] = subprop
+                    subprop.__doc__ = doc
             # Remove the name of the Include attribute itself
             removes.add(name)
 
@@ -487,6 +300,7 @@ class MetaHasProps(type):
             del class_dict[tmp]
 
         dataspecs = {}
+        units_to_add = {}
         for name, prop in class_dict.items():
             if isinstance(prop, Property):
                 prop.name = name
@@ -497,6 +311,8 @@ class MetaHasProps(type):
                 names.add(name)
                 if isinstance(prop, DataSpec):
                     dataspecs[name] = prop
+                    if hasattr(prop, '_units_type'):
+                        units_to_add[name+"_units"] = prop._units_type
 
             elif isinstance(prop, type) and issubclass(prop, Property):
                 # Support the user adding a property without using parens,
@@ -510,6 +326,11 @@ class MetaHasProps(type):
                 # Process dataspecs
                 if issubclass(prop, DataSpec):
                     dataspecs[name] = newprop
+
+        for name, prop in units_to_add.items():
+            prop.name = name
+            names.add(name)
+            class_dict[name] = prop
 
         class_dict["__properties__"] = names
         class_dict["__properties_with_refs__"] = names_with_refs
@@ -648,6 +469,11 @@ class HasProps(object):
             print("%s%s: %r" % ("  "*indent, key, value))
 
 class PrimitiveProperty(Property):
+    """ A base class for simple property types. Subclasses should
+    define a class attribute ``_underlying_type`` that is a tuple
+    of acceptable type values for the property.
+
+    """
 
     _underlying_type = None
 
@@ -666,29 +492,29 @@ class PrimitiveProperty(Property):
             raise DeserializationError("%s expected %s, got %s" % (self, expected, json))
 
 class Bool(PrimitiveProperty):
-    ''' Boolean type property. '''
+    """ Boolean type property. """
     _underlying_type = (bool,)
 
 class Int(PrimitiveProperty):
-    ''' Signed integer type property. '''
+    """ Signed integer type property. """
     _underlying_type = bokeh_integer_types
 
 class Float(PrimitiveProperty):
-    ''' Floating point type property. '''
+    """ Floating point type property. """
     _underlying_type = (float, ) + bokeh_integer_types
 
 class Complex(PrimitiveProperty):
-    ''' Complex floating point type property. '''
+    """ Complex floating point type property. """
     _underlying_type = (complex, float) + bokeh_integer_types
 
 class String(PrimitiveProperty):
-    ''' String type property. '''
+    """ String type property. """
     _underlying_type = string_types
 
 class Regex(String):
-    ''' Regex type property validates that text values match the
+    """ Regex type property validates that text values match the
     given regular expression.
-    '''
+    """
     def __init__(self, regex, default=None, help=None):
         self.regex = re.compile(regex)
         super(Regex, self).__init__(default=default, help=help)
@@ -702,8 +528,31 @@ class Regex(String):
     def __str__(self):
         return "%s(%r)" % (self.__class__.__name__, self.regex.pattern)
 
+class JSON(String):
+    """ JSON type property validates that text values are valid JSON.
+
+    ..  note::
+        The string is transmitted and received by BokehJS as a *string*
+        containing JSON content. i.e., you must use ``JSON.parse`` to unpack
+        the value into a JavaScript hash.
+
+    """
+    def validate(self, value):
+        super(JSON, self).validate(value)
+
+        if value is None: return
+
+        try:
+            import json
+            json.loads(value)
+        except ValueError:
+            raise ValueError("expected JSON text, got %r" % value)
+
 class ParameterizedProperty(Property):
-    """ Base class for Properties that have type parameters, e.g. `List(String)`. """
+    """ Base class for Properties that have type parameters, e.g.
+    ``List(String)``.
+
+    """
 
     @staticmethod
     def _validate_type_param(type_param):
@@ -726,12 +575,13 @@ class ParameterizedProperty(Property):
         return any(type_param.has_ref for type_param in self.type_params)
 
 class ContainerProperty(ParameterizedProperty):
-    ''' Base class for Container-like type properties. '''
-    # Base class for container-like things; this helps the auto-serialization
-    # and attribute change detection code
+    """ Base class for Container-like type properties. """
     pass
 
 class Seq(ContainerProperty):
+    """ Sequence (list, tuple) type property.
+
+    """
 
     def _is_seq(self, value):
         return isinstance(value, collections.Container) and not isinstance(value, collections.Mapping)
@@ -766,14 +616,23 @@ class Seq(ContainerProperty):
             raise DeserializationError("%s expected a list or None, got %s" % (self, json))
 
 class List(Seq):
+    """ Python list type property.
+
+    """
 
     def __init__(self, item_type, default=[], help=None):
+        # todo: refactor to not use mutable objects as default values.
+        # Left in place for now because we want to allow None to express
+        # opional values. Also in Dict.
         super(List, self).__init__(item_type, default=default, help=help)
 
     def _is_seq(self, value):
         return isinstance(value, list)
 
 class Array(Seq):
+    """ NumPy array type property.
+
+    """
 
     def _is_seq(self, value):
         import numpy as np
@@ -783,8 +642,11 @@ class Array(Seq):
         return np.array(value)
 
 class Dict(ContainerProperty):
-    """ If a default value is passed in, then a shallow copy of it will be
+    """ Python dict type property.
+
+    If a default value is passed in, then a shallow copy of it will be
     used for each new use of this property.
+
     """
 
     def __init__(self, keys_type, values_type, default={}, help=None):
@@ -816,7 +678,7 @@ class Dict(ContainerProperty):
             raise DeserializationError("%s expected a dict or None, got %s" % (self, json))
 
 class Tuple(ContainerProperty):
-    ''' Tuple type property. '''
+    """ Tuple type property. """
     def __init__(self, tp1, tp2, *type_params, **kwargs):
         self._type_params = list(map(self._validate_type_param, (tp1, tp2) + type_params))
         super(Tuple, self).__init__(default=kwargs.get("default"), help=kwargs.get("help"))
@@ -845,10 +707,10 @@ class Tuple(ContainerProperty):
             raise DeserializationError("%s expected a list or None, got %s" % (self, json))
 
 class Instance(Property):
-    ''' Instance type property for referneces to other Models in the object
+    """ Instance type property, for references to other Models in the object
     graph.
 
-    '''
+    """
     def __init__(self, instance_type, default=None, help=None):
         if not isinstance(instance_type, (type,) + string_types):
             raise ValueError("expected a type or string, got %s" % instance_type)
@@ -917,41 +779,41 @@ class This(Property):
 
 # Fake types, ABCs
 class Any(Property):
-    ''' Any type property accepts any values. '''
+    """ Any type property accepts any values. """
     pass
 
 class Function(Property):
-    ''' Function type property. '''
+    """ Function type property. """
     pass
 
 class Event(Property):
-    ''' Event type property. '''
+    """ Event type property. """
     pass
 
-class Range(ParameterizedProperty):
-    ''' Range type property ensures values are between a range. '''
-    def __init__(self, range_type, start, end, default=None, help=None):
-        self.range_type = self._validate_type_param(range_type)
-        self.range_type.validate(start)
-        self.range_type.validate(end)
+class Interval(ParameterizedProperty):
+    ''' Range type property ensures values are contained inside a given interval. '''
+    def __init__(self, interval_type, start, end, default=None, help=None):
+        self.interval_type = self._validate_type_param(interval_type)
+        self.interval_type.validate(start)
+        self.interval_type.validate(end)
         self.start = start
         self.end = end
-        super(Range, self).__init__(default=default, help=help)
+        super(Interval, self).__init__(default=default, help=help)
 
     @property
     def type_params(self):
-        return [self.range_type]
+        return [self.interval_type]
 
     def validate(self, value):
-        super(Range, self).validate(value)
+        super(Interval, self).validate(value)
 
-        if not (value is None or self.range_type.is_valid(value) and value >= self.start and value <= self.end):
-            raise ValueError("expected a value of type %s in range [%s, %s], got %r" % (self.range_type, self.start, self.end, value))
+        if not (value is None or self.interval_type.is_valid(value) and value >= self.start and value <= self.end):
+            raise ValueError("expected a value of type %s in range [%s, %s], got %r" % (self.interval_type, self.start, self.end, value))
 
     def __str__(self):
-        return "%s(%s, %r, %r)" % (self.__class__.__name__, self.range_type, self.start, self.end)
+        return "%s(%s, %r, %r)" % (self.__class__.__name__, self.interval_type, self.start, self.end)
 
-class Byte(Range):
+class Byte(Interval):
     ''' Byte type property. '''
     def __init__(self, default=0, help=None):
         super(Byte, self).__init__(Int, 0, 255, default=default, help=help)
@@ -1056,21 +918,26 @@ class Color(Either):
     def __str__(self):
         return self.__class__.__name__
 
+
 class Align(Property):
     pass
 
 class DashPattern(Either):
-    """
-    This is a property that expresses line dashes.  It can be specified in
-    a variety of forms:
+    """ Dash type property.
 
-    * "solid", "dashed", "dotted", "dotdash", "dashdot"
-    * A tuple or list of integers in the HTML5 Canvas dash specification
-      style: http://www.w3.org/html/wg/drafts/2dcontext/html5_canvas/#dash-list
+    Express patterns that describe line dashes.  ``DashPattern`` values
+    can be specified in a variety of ways:
+
+    * An enum: "solid", "dashed", "dotted", "dotdash", "dashdot"
+    * a tuple or list of integers in the `HTML5 Canvas dash specification style`_.
       Note that if the list of integers has an odd number of elements, then
       it is duplicated, and that duplicated list becomes the new dash list.
 
-    If dash is turned off, then the dash pattern is the empty list [].
+    To indicate that dashing is turned off (solid lines), specify the empty
+    list [].
+
+    .. _HTML5 Canvas dash specification style: http://www.w3.org/html/wg/drafts/2dcontext/html5_canvas/#dash-list
+
     """
 
     _dash_patterns = {
@@ -1082,7 +949,7 @@ class DashPattern(Either):
     }
 
     def __init__(self, default=[], help=None):
-        types = Enum(enums.DashPattern), Regex(r"^(\d+(\s+\d+)*)?$"), List(Int)
+        types = Enum(enums.DashPattern), Regex(r"^(\d+(\s+\d+)*)?$"), Seq(Int)
         super(DashPattern, self).__init__(*types, default=default, help=help)
 
     def transform(self, value):
@@ -1100,7 +967,12 @@ class DashPattern(Either):
         return self.__class__.__name__
 
 class Size(Float):
-    """ Equivalent to an unsigned int """
+    """ Size type property.
+
+    .. note::
+        ``Size`` is equivalent to an unsigned int.
+
+    """
     def validate(self, value):
         super(Size, self).validate(value)
 
@@ -1108,8 +980,11 @@ class Size(Float):
             raise ValueError("expected a non-negative number, got %r" % value)
 
 class Percent(Float):
-    """ Percent is useful for alphas and coverage and extents; more
-    semantically meaningful than Float(0..1)
+    """ Percentage type property.
+
+    Percents are useful for specifying alphas and coverage and extents; more
+    semantically meaningful than Float(0..1).
+
     """
     def validate(self, value):
         super(Percent, self).validate(value)
@@ -1118,11 +993,13 @@ class Percent(Float):
             raise ValueError("expected a value in range [0, 1], got %r" % value)
 
 class Angle(Float):
-    ''' Angle type property. '''
+    """ Angle type property. """
     pass
 
 class Date(Property):
-    ''' Date (not datetime) type property. '''
+    """ Date (not datetime) type property.
+
+    """
     def __init__(self, default=datetime.date.today(), help=None):
         super(Date, self).__init__(default=default, help=help)
 
@@ -1146,7 +1023,10 @@ class Date(Property):
         return value
 
 class Datetime(Property):
-    ''' Datetime type property. '''
+    """ Datetime type property.
+
+    """
+
     def __init__(self, default=datetime.date.today(), help=None):
         super(Datetime, self).__init__(default=default, help=help)
 
@@ -1171,7 +1051,10 @@ class Datetime(Property):
 
 
 class RelativeDelta(Dict):
-    ''' RelativeDelta type property for time deltas. '''
+    """ RelativeDelta type property for time deltas.
+
+    """
+
     def __init__(self, default={}, help=None):
         keys = Enum("years", "months", "days", "hours", "minutes", "seconds", "microseconds")
         values = Int
@@ -1179,3 +1062,189 @@ class RelativeDelta(Dict):
 
     def __str__(self):
         return self.__class__.__name__
+
+class DataSpec(Either):
+    def __init__(self, typ, default, help=None):
+        super(DataSpec, self).__init__(String, Dict(String, Either(String, typ)), typ, default=default, help=help)
+        self._type = self._validate_type_param(typ)
+
+    def to_dict(self, obj):
+        val = getattr(obj, self._name, self.default)
+
+        # Check for None value
+        if val is None:
+            return dict(value=None)
+
+        # Check for spec type value
+        try:
+            self._type.validate(val)
+            return dict(value=val)
+        except ValueError:
+            pass
+
+        # Check for data source field name
+        if isinstance(val, string_types):
+            return dict(field=val)
+
+        # Must be dict, return as-is
+        return val
+
+    def __str__(self):
+        val = getattr(self, self._name, self.default)
+        return "%s(%r)" % (self.__class__.__name__, val)
+
+class NumberSpec(DataSpec):
+    def __init__(self, default, help=None):
+        super(NumberSpec, self).__init__(Float, default=default, help=help)
+
+class StringSpec(DataSpec):
+    def __init__(self, default, help=None):
+        super(StringSpec, self).__init__(List(String), default=default, help=help)
+
+    def __set__(self, obj, value):
+        if isinstance(value, list):
+            if len(value) != 1:
+                raise TypeError("StringSpec convenience list values must have length 1")
+            value = dict(value=value[0])
+        super(StringSpec, self).__set__(obj, value)
+
+class FontSizeSpec(DataSpec):
+    def __init__(self, default, help=None):
+        super(FontSizeSpec, self).__init__(List(String), default=default, help=help)
+
+    def __set__(self, obj, value):
+        if isinstance(value, string_types):
+            warn('Setting a fixed font size value as a string %r is deprecated, '
+                 'set with value(%r) or [%r] instead' % (value, value, value),
+                 DeprecationWarning, stacklevel=2)
+            if len(value) > 0 and value[0].isdigit():
+                value = dict(value=value)
+        super(FontSizeSpec, self).__set__(obj, value)
+
+class UnitsSpec(NumberSpec):
+    def __init__(self, default, units_type, units_default, help=None):
+        super(UnitsSpec, self).__init__(default=default, help=help)
+        self._units_type = self._validate_type_param(units_type)
+        self._units_type.validate(units_default)
+        self._units_type._default = units_default
+
+    def to_dict(self, obj):
+        d = super(UnitsSpec, self).to_dict(obj)
+        d["units"] = getattr(obj, self.name+"_units")
+        return d
+
+    def __set__(self, obj, value):
+        if isinstance(value, dict):
+            units = value.pop("units", None)
+            if units: setattr(obj, self.name+"_units", units)
+        super(UnitsSpec, self).__set__(obj, value)
+
+    def __str__(self):
+        val = getattr(self, self._name, self.default)
+        return "%s(%r, units_default=%r)" % (self.__class__.__name__, val, self._units_type._default)
+
+class AngleSpec(UnitsSpec):
+    def __init__(self, default, units_default="rad", help=None):
+        super(AngleSpec, self).__init__(default=default, units_type=Enum(enums.AngleUnits), units_default=units_default, help=help)
+
+class DistanceSpec(UnitsSpec):
+    def __init__(self, default, units_default="data", help=None):
+        super(DistanceSpec, self).__init__(default=default, units_type=Enum(enums.SpatialUnits), units_default=units_default, help=help)
+
+    def __set__(self, obj, value):
+        try:
+            if value < 0:
+                raise ValueError("Distances must be non-negative")
+        except TypeError:
+            pass
+        super(DistanceSpec, self).__set__(obj, value)
+
+class ScreenDistanceSpec(NumberSpec):
+    def to_dict(self, obj):
+        d = super(ScreenDistanceSpec, self).to_dict(obj)
+        d["units"] = "screen"
+        return d
+
+    def __set__(self, obj, value):
+        try:
+            if value < 0:
+                raise ValueError("Distances must be non-negative")
+        except TypeError:
+            pass
+        super(ScreenDistanceSpec, self).__set__(obj, value)
+
+class DataDistanceSpec(NumberSpec):
+    def to_dict(self, obj):
+        d = super(ScreenDistanceSpec, self).to_dict(obj)
+        d["units"] = "data"
+        return d
+
+    def __set__(self, obj, value):
+        try:
+            if value < 0:
+                raise ValueError("Distances must be non-negative")
+        except TypeError:
+            pass
+        super(DataDistanceSpec, self).__set__(obj, value)
+
+class ColorSpec(DataSpec):
+    def __init__(self, default, help=None):
+        super(ColorSpec, self).__init__(Color, default=default, help=help)
+
+    @classmethod
+    def isconst(cls, arg):
+        """ Returns True if the argument is a literal color.  Check for a
+        well-formed hexadecimal color value.
+        """
+        return isinstance(arg, string_types) and \
+               ((len(arg) == 7 and arg[0] == "#") or arg in enums.NamedColor._values)
+
+    @classmethod
+    def is_color_tuple(cls, val):
+        return isinstance(val, tuple) and len(val) in (3, 4)
+
+    @classmethod
+    def format_tuple(cls, colortuple):
+        if len(colortuple) == 3:
+            return "rgb%r" % (colortuple,)
+        else:
+            return "rgba%r" % (colortuple,)
+
+    def to_dict(self, obj):
+        val = getattr(obj, self._name, self.default)
+
+        if val is None:
+            return dict(value=None)
+
+        # Check for hexadecimal or named color
+        if self.isconst(val):
+            return dict(value=val)
+
+        # Check for RGB or RGBa tuple
+        if isinstance(val, tuple):
+            return dict(value=self.format_tuple(val))
+
+        # Check for data source field name
+        if isinstance(val, string_types):
+            return dict(field=val)
+
+        # Must be dict, return as-is
+        return val
+
+    def validate(self, value):
+        try:
+            return super(ColorSpec, self).validate(value)
+        except ValueError as e:
+            # Check for tuple input if not yet a valid input type
+            if self.is_color_tuple(value):
+                return True
+            else:
+                raise e
+
+    def transform(self, value):
+
+        # Make sure that any tuple has either three integers, or three integers and one float
+        if isinstance(value, tuple):
+            value = tuple(int(v) if i < 3 else v for i, v in enumerate(value))
+
+        return value

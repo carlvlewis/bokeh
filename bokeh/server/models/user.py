@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 
 import uuid
 
@@ -15,6 +16,8 @@ def apiuser_from_request(app, request):
         return None
     username = request.headers['BOKEHUSER']
     bokehuser = User.load(app.servermodel_storage, username)
+    if bokehuser is None:
+        return None
     if bokehuser.apikey == apikey:
         return bokehuser
     else:

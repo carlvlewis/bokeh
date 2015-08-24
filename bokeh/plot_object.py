@@ -3,13 +3,13 @@ from __future__ import absolute_import, print_function
 import logging
 logger = logging.getLogger(__file__)
 
-from functools import wraps
-
 from six import add_metaclass, iteritems
 
 from .properties import Any, HasProps, List, MetaHasProps, Instance, String
 from .query import find
-from .utils import dump, is_ref, json_apply, make_id, resolve_json
+from .exceptions import DataIntegrityException
+from .util.serialization import dump, make_id
+from .validation import check_integrity
 
 class Viewable(MetaHasProps):
     """ Any plot object (Data Model) which has its own View Model in the
@@ -46,8 +46,9 @@ class Viewable(MetaHasProps):
 
     @classmethod
     def _preload_models(cls):
-        from . import models
-        from .crossfilter import models
+        from . import models; models
+        from .crossfilter import models as crossfilter_models; crossfilter_models
+        from .charts import Chart; Chart
 
     @classmethod
     def get_class(cls, view_model_name):
@@ -122,6 +123,23 @@ class PlotObject(HasProps):
 
         '''
         return find(self.references(), selector)
+
+    def select_one(self, selector):
+        ''' Query this object and all of its references for objects that
+        match the given selector.  Raises an error if more than one object
+        is found.  Returns single matching object, or None if nothing is found
+        Args:
+            selector (JSON-like) :
+
+        Returns:
+            PlotObject
+        '''
+        result = list(self.select(selector))
+        if len(result) > 1:
+            raise DataIntegrityException("found more than one object matching %s" % selector)
+        if len(result) == 0:
+            return None
+        return result[0]
 
     def set_select(self, selector, updates):
         ''' Update objects that match a given selector with the specified
@@ -258,14 +276,18 @@ class PlotObject(HasProps):
         attrs['id'] = self._id
         return attrs
 
-    def dump(self, docid=None, changed_only=True):
+    def dump(self, docid=None, changed_only=True, validate=True):
         """convert all references to json
 
         Args:
             changed_only (bool, optional) : whether to dump only attributes
                 that have had their values changed at some point (default: True)
+            validate (bool, optional) : whether to perform integrity checks on
+                the object graph (default: True)
         """
         models = self.references()
+        if validate:
+            check_integrity(models)
         return dump(models, docid=docid, changed_only=changed_only)
 
     def update(self, **kwargs):

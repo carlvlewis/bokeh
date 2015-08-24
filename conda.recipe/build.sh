@@ -8,18 +8,27 @@ BLD_DIR=`pwd`
 SRC_DIR=$RECIPE_DIR/..
 pushd $SRC_DIR
 
-# X.X.X.dev.YYYYMMDD builds
-if [ -e using_tags.txt ]; then
-    version=`git describe --tags`
+version=`$PYTHON scripts/get_bump_version.py`
+
+if [ -e "__travis_build_id__.txt" ]; then
+    travis_build_id=$(cat __travis_build_id__.txt)
+    if [[ -z "$travis_build_id" ]]; then
+        # for releases we just need the tag
+        echo $version > __conda_version__.txt
+    else
+        # for devel builds we also need the travis_build__id
+        echo $version.$travis_build_id > __conda_version__.txt
+    fi
 else
-    version=`$PYTHON scripts/get_bump_version.py`
+    # for local building we don't have the travis_build__id
+    echo $version > __conda_version__.txt
 fi
 
-date=`date "+%Y%m%d"`
-echo $version.dev.$date > __conda_version__.txt
 cp __conda_version__.txt $BLD_DIR
 
 pushd bokehjs
+echo "npm version $(npm -v)"
+echo "node version $(node -v)"
 npm install
 popd
 

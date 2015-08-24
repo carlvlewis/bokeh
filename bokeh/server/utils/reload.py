@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 
 import atexit
 import os
@@ -5,14 +6,19 @@ import sys
 import time
 import traceback
 
-from werkzeug.serving import _iter_module_files
+try:
+    from werkzeug._reloader import _iter_module_files
+except ImportError:
+    # backward compat with old versions of werkzeug
+    from werkzeug.serving import _iter_module_files
+
 
 def broadcast_reload():
     from bokeh.server.app import bokeh_app
     if hasattr(bokeh_app, 'wsmanager'):
         bokeh_app.wsmanager.send('debug:debug', 'reload')
 
-def _wait_for_edit(extra_files=[], interval=1):
+def _wait_for_edit(extra_files=None, interval=1):
     """Waits until one of the files we're using have changed
     """
     from itertools import chain

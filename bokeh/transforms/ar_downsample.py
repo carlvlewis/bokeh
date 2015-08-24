@@ -1,10 +1,10 @@
-from __future__ import print_function
+from __future__ import absolute_import, print_function
 from ..plotting import figure, curdoc
 from ..plot_object import PlotObject
 from ..models import ServerDataSource,  GlyphRenderer, Range1d, Color
 from ..properties import (Instance, Any, Either,
                           Int, Float, List, Bool, String)
-from six import get_function_code
+from six import get_function_code, string_types
 
 import bokeh.colors as colors
 import numpy as np
@@ -27,6 +27,8 @@ Joseph Cottam (jcottam@indiana.edu)
 -------------------------------------------------------
 """
 
+# Tell pyflakes that these names exists
+ari = ar = categories = contour = infos = general = glyphset = npg = numeric = util = None
 
 def _loadAR():
     """
@@ -58,10 +60,10 @@ def _loadAR():
         raise ImportError("Abstract rendering version not found; import aborted.")
 
     if (ari.__version_info__["major"] != expected["major"]
-       or ari.__version_info__["minor"] != expected["minor"]
-       or ari.__version_info__["micro"] < expected["micro"]):
-           raise ImportError("Abstract rendering version mismatched." +
-                             "Expecting at least {0}, found {1}".format(_AR_VERSION, ari.__version__))
+        or ari.__version_info__["minor"] != expected["minor"]
+        or ari.__version_info__["micro"] < expected["micro"]):
+            raise ImportError("Abstract rendering version mismatched." +
+                              "Expecting at least {0}, found {1}".format(_AR_VERSION, ari.__version__))
 
     try:
         globals()["ar"] = import_module("abstract_rendering.core")
@@ -229,7 +231,7 @@ class ImageShader(Shader):
                 return tuple(color[0:3]) + (min(abs(color[3])*255, 255),)
             raise ValueError("Improperly formatted tuple for color %s" % color)
 
-        if isinstance(color, str) or isinstance(color, unicode):
+        if isinstance(color, string_types):
             if color[0] == "#":
                 color = color.lstrip('#')
                 lv = len(color)
@@ -404,7 +406,7 @@ class Contour(Shader):
 def replot(plot,
            agg=Count(), info=Const(val=1), shader=Id(),
            remove_original=True,
-           plot_opts={}, **kwargs):
+           plot_opts=None, **kwargs):
     """
     Treat the passed plot as an base plot for abstract rendering, generate the
     proper Bokeh plot based on the passed parameters.
@@ -449,6 +451,7 @@ def replot(plot,
     fig_opts['title'] = kwargs.pop('title', plot.title)
 
     src = source(plot, agg, info, shader, **source_opts)
+    plot_opts = plot_opts or {}
     plot_opts.update(mapping(src))
 
     new_plot = figure(**fig_opts)
@@ -475,9 +478,7 @@ def _renderer(plot):
     """
     return [r for r in plot.renderers
             if (isinstance(r, GlyphRenderer)
-                and hasattr(r, "server_data_source")
-                and r.server_data_source is not None)][0]
-
+                and isinstance(r.data_source, ServerDataSource))][0]
 
 # TODO: just use glyph instead of obsolete glyphspec
 def get_glyphspec(glyph):
@@ -491,12 +492,10 @@ def source(plot,
            points=False, balancedZoom=False, **kwargs):
     # Acquire information from renderer...
     rend = _renderer(plot)
-    datasource = rend.server_data_source
+    datasource = rend.data_source
     kwargs['data_url'] = datasource.data_url
-    kwargs['owner_username'] = datasource.owner_username
-
-    spec = get_glyphspec(rend.glyph)
-
+    kwargs['expr'] = datasource.expr
+    kwargs['namespace'] = datasource.namespace
     # TODO: Use reformat here?
     if shader.out == "image" or shader.out == "image_rgb":
         kwargs['data'] = {'image': [],
@@ -519,12 +518,14 @@ def source(plot,
 
     kwargs['transform'] = {
         'resample': "abstract rendering",
+        'auto_bounds' : True,
         'agg': agg,
         'info': info,
         'shader': shader,
-        'glyphspec': spec,
+        'glyphspec': rend.glyph,
         'balancedZoom': balancedZoom,
         'points': points}
+
     return ServerDataSource(**kwargs)
 
 
@@ -576,10 +577,15 @@ def _generate_render_state(plot_state):
             'y_span': data_y_span}
 
 
-def downsample(data, transform, plot_state, render_state):
+def downsample(raw_data, data_source, glyph, plot_state, render_state, auto_bounds):
     _loadAR()  # Must be called before any attempts to use AR proper
 
     # XXX: transform['glyphspec'] is really a glyph
+    data = raw_data
+    transform = data_source.transform
+    # the glyph which is passed in is the glyph asking for this computation
+    # the glyph that is stored on the data source is the original glyph that
+    # generated the data source (so if original is square, then new is image_rgba)
     glyphspec = get_glyphspec(transform['glyphspec'])
     xcol = glyphspec['x']['field']
     ycol = glyphspec['y']['field']
@@ -591,10 +597,9 @@ def downsample(data, transform, plot_state, render_state):
 
     # Translate the resample parameters to server-side rendering....
     # TODO: Do more to preserve the 'natural' data form and have make_glyphset build the 'right thing' (tm)
-
     if not isinstance(data, dict):
         columns = [xcol, ycol] + ([datacol] if datacol else [])
-        data = data.select(columns=columns)
+        data = data[columns]
 
     xcol = data[xcol]
     ycol = data[ycol]
@@ -603,9 +608,9 @@ def downsample(data, transform, plot_state, render_state):
     shader = transform['shader']
 
     if shader.out == "image" or shader.out == "image_rgb":
-        rslt = downsample_image(xcol, ycol, glyphs, transform, plot_state)
+        rslt = downsample_image(xcol, ycol, glyphs, transform, plot_state, auto_bounds)
     elif shader.out == "multi_line":
-        rslt = downsample_line(xcol, ycol, glyphs, transform, plot_state)
+        rslt = downsample_line(xcol, ycol, glyphs, transform, plot_state, auto_bounds)
     else:
         raise ValueError("Unhandled shader output '{0}.".format(shader.out))
 
@@ -614,107 +619,86 @@ def downsample(data, transform, plot_state, render_state):
     return rslt
 
 
-def downsample_line(xcol, ycol, glyphs, transform, plot_state):
-    logger.info("Starting line-producing downsample")
-    screen_x_span = float(_span(plot_state['screen_x']))
-    screen_y_span = float(_span(plot_state['screen_y']))
-    data_x_span = float(_span(plot_state['data_x']))
-    data_y_span = float(_span(plot_state['data_y']))
+def downsample_line(xcol, ycol, glyphs, transform, plot_state, auto_bounds):
+    # todo handle flipped axes (start < end)
+    if auto_bounds:
+        plot_state['data_x'].start = xcol.min()
+        plot_state['data_x'].end = xcol.max()
+        plot_state['data_y'].start = ycol.min()
+        plot_state['data_y'].end = ycol.max()
+    #screen_x_span = float(_span(plot_state['screen_x']))  # todo: use these?
+    #screen_y_span = float(_span(plot_state['screen_y']))
+    #data_x_span = float(_span(plot_state['data_x']))  # todo: use these?
+    #data_y_span = float(_span(plot_state['data_y']))
     shader = transform['shader']
 
-    if data_x_span == 0 or data_y_span == 0:
-        # How big would a full plot of the data be at the current resolution?
-        # If scale is zero for either axis, don't actual render,
-        # instead report back data bounds and wait for the next request
-        # This enables guide creation...which changes the available plot size.
-        plot_size = [screen_x_span, screen_y_span]
-        parts = shader.reformat(None)
-    else:
-        bounds = glyphs.bounds()
-        plot_size = [bounds[2], bounds[3]]
-        balancedZoom = transform.get('balancedZoom', False)
+    bounds = glyphs.bounds()
+    plot_size = [bounds[2], bounds[3]]
+    balancedZoom = transform.get('balancedZoom', False)
 
-        vt = util.zoom_fit(plot_size, bounds, balanced=balancedZoom)
+    vt = util.zoom_fit(plot_size, bounds, balanced=balancedZoom)
 
-        lines = ar.render(glyphs,
-                          transform['info'].reify(),
-                          transform['agg'].reify(glyphset=glyphs),
-                          shader.reify(),
-                          plot_size, vt)
+    lines = ar.render(glyphs,
+                      transform['info'].reify(),
+                      transform['agg'].reify(glyphset=glyphs),
+                      shader.reify(),
+                      plot_size, vt)
 
-        parts = shader.reformat(lines, xcol.min(), ycol.min())
-
-    parts['x_range'] = {'start': xcol.min(), 'end': xcol.max()}
-    parts['y_range'] = {'start': ycol.min(), 'end': ycol.max()}
-
+    result = {'data' : shader.reformat(lines, xcol.min(), ycol.min())}
+    result['x_range'] = {'start': plot_state['data_x'].start,
+                         'end': plot_state['data_x'].end}
+    result['y_range'] = {'start': plot_state['data_y'].start,
+                         'end': plot_state['data_y'].end}
     logger.info("Finished line-producing downsample")
-    return parts
+    return result
 
 
-def downsample_image(xcol, ycol, glyphs, transform, plot_state):
+def downsample_image(xcol, ycol, glyphs, transform, plot_state, auto_bounds):
     logger.info("Starting image-producing downsample")
+    # todo handle flipped axes (start < end)
+    if auto_bounds:
+        plot_state['data_x'].start = xcol.min()
+        plot_state['data_x'].end = xcol.max()
+        plot_state['data_y'].start = ycol.min()
+        plot_state['data_y'].end = ycol.max()
     screen_x_span = float(_span(plot_state['screen_x']))
     screen_y_span = float(_span(plot_state['screen_y']))
     data_x_span = float(_span(plot_state['data_x']))
     data_y_span = float(_span(plot_state['data_y']))
     shader = transform['shader']
-    balanced_zoom = transform.get('balancedZoom', False)
+    #balanced_zoom = transform.get('balancedZoom', False)  # todo: use this?
 
-    if data_x_span == 0 or data_y_span == 0:
-        # How big would a full plot of the data be at the current resolution?
-        # If scale is zero for either axis, don't actual render,
-        # instead report back data bounds and wait for the next request
-        # This enables guide creation...which changes the available plot size.
-        image = shader.reformat(None)
-        if balanced_zoom:
-            bounds = glyphs.bounds()
-            scale_x = 1
-            scale_y = (bounds[2]/bounds[3])/(screen_x_span/screen_y_span)
-        else:
-            scale_x = 1
-            scale_y = 1
-    else:
-        bounds = glyphs.bounds()
-        scale_x = data_x_span/screen_x_span
-        scale_y = data_y_span/screen_y_span
-        plot_size = (bounds[2]/scale_x, bounds[3]/scale_y)
+    bounds = glyphs.bounds()
+    scale_x = data_x_span/screen_x_span
+    scale_y = data_y_span/screen_y_span
+    plot_size = (bounds[2]/scale_x, bounds[3]/scale_y)
 
-        vt = util.zoom_fit(plot_size, bounds, balanced=False)
-        (tx, ty, sx, sy) = vt
+    vt = util.zoom_fit(plot_size, bounds, balanced=False)
+    (tx, ty, sx, sy) = vt
 
-        image = ar.render(glyphs,
-                          transform['info'].reify(),
-                          transform['agg'].reify(glyphset=glyphs),
-                          shader.reify(),
-                          plot_size, vt)
+    image = ar.render(glyphs,
+                      transform['info'].reify(),
+                      transform['agg'].reify(glyphset=glyphs),
+                      shader.reify(),
+                      plot_size, vt)
 
-        image = shader.reformat(image)
-
-    rslt = {'image': [image],
-            'global_offset_x': [0],
-            'global_offset_y': [0],
-
-            # Screen-mapping values.
-            # x_range is the left and right data space values corresponding to
-            #     the bottom left and bottom right of the plot
-            # y_range is the bottom and top data space values corresponding to
-            #     the bottom left and top left of the plot
-            'x_range': {'start': xcol.min()*scale_x,
-                        'end': xcol.max()*scale_x},
-            'y_range': {'start': ycol.min()*scale_y,
-                        'end': ycol.max()*scale_y},
-
-            # Data-image parameters.
-            # x/y are lower left data-space coord of the image.
-            # dw/dh are the width and height in data space
-            'x': [xcol.min()],
-            'y': [ycol.min()],
-            'dw': [xcol.max()-xcol.min()],
-            'dh': [ycol.max()-ycol.min()]
-            }
-
+    image = shader.reformat(image)
+    """AR renders the WHOLE dataset - then it's up to the client
+    to only render the proper subset.  The client should also not
+    re-request on operations hat do not require re-renders (i.e. pans)
+    however I broke that in the blaze refactor - TODO :  is to fix that
+    """
+    result = {'data' : {'image': [image],
+                        'x': [xcol.min()],
+                        'y': [ycol.min()],
+                        'dw': [xcol.max() - xcol.min()],
+                        'dh': [ycol.max() - ycol.min()]}}
+    result['x_range'] = {'start': plot_state['data_x'].start,
+                         'end': plot_state['data_x'].end}
+    result['y_range'] = {'start': plot_state['data_y'].start,
+                         'end': plot_state['data_y'].end}
     logger.info("Finished image-producing downsample")
-    return rslt
+    return result
 
 
 def _datacolumn(glyphspec):
@@ -733,7 +717,6 @@ def _datacolumn(glyphspec):
         return (key in glyphspec
                 and isinstance(glyphspec[key], dict)
                 and glyphspec[key].get('field', False))
-
     return (maybe_get('type')
             or maybe_get('fill_color')
             or maybe_get('fill_alpha')

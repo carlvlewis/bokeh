@@ -5,12 +5,15 @@ package:
 build:
   number: {{ environ.get('BINSTAR_BUILD', 1) }}
 
+extra:
+  channels:
+    - bokeh
+
 requirements:
   build:
     - python
     - distribute
     - setuptools
-    - nodejs
 
   run:
     # bokeh
@@ -30,22 +33,19 @@ requirements:
     - greenlet
     # - redis                [linux or osx]
     # - redis-py             [linux or osx]
-    - gevent               [py2k]
-    - gevent-websocket     [py2k]
     # - abstract-rendering   [py2k]
 
     # CLI
-    - click
+    # - click
 
 test:
   requires:
     # docs
     - graphviz
-    - sphinx
+    - sphinx >=1.3.1
     - pygments
     - sphinx-bootstrap-theme
     - sphinxcontrib-httpdomain
-    - sphinxcontrib-napoleon
 
     # tests
     - beautiful-soup
@@ -54,12 +54,14 @@ test:
     - pdiff
     - boto                 [py2k]
     - jinja2
-    - nose
+    - pytest
+    - pytest-cov ==1.8.1
     - mock
     - coverage
     - websocket-client
     - ipython
     - ipython-notebook
+    - flake8
 
     # examples
     - scipy
